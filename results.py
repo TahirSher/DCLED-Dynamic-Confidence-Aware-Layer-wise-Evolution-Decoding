@@ -1,3 +1,4 @@
+import torch
 import json
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
@@ -1162,4 +1163,5 @@ def generate_all_qualitative_figures(qual_collector, results_dict, ablation_anal
     
     logger.info("="*80)
     logger.info("ALL FIGURES GENERATED WITH CONSISTENT COLOR SCHEME")
+
     logger.info("="*80)
