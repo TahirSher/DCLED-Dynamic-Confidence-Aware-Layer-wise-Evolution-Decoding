@@ -175,6 +175,7 @@ def evaluate_truthfulqa_quick(
     args: argparse.Namespace,
     custom_params: Optional[Dict] = None
 ) -> Dict[str, float]:
+    """Quick TruthfulQA evaluation for hyperparameter search."""
     
     generate_kwargs = {
         'mode': mode,
@@ -194,7 +195,7 @@ def evaluate_truthfulqa_quick(
     for sample in dataset:
         ref_true = split_multi_answer(sample['answer_true'])
         ref_false = split_multi_answer(sample['answer_false'])
-        ref_best = format_best(sample['answer_best'])  # ADD THIS LINE - DEFINE ref_best
+        ref_best = format_best(sample['answer_best'])  
         
         if not ref_true or not ref_false:
             continue
@@ -230,6 +231,7 @@ def evaluate_benchmark_quick(
     args: argparse.Namespace,
     custom_params: Optional[Dict] = None
 ) -> Dict:
+    """Quick benchmark evaluation for hyperparameter search."""
     
     generate_kwargs = {
         "mode": mode,
@@ -300,9 +302,11 @@ def evaluate_truthfulqa_full(
     custom_params: Optional[Dict] = None,
     qual_collector: Optional[QualitativeExperimentCollector] = None
 ) -> Dict[str, Any]:
+    """Full TruthfulQA evaluation with bootstrap confidence intervals."""
     
     logger.info(f"\n[TruthfulQA] Evaluating {mode}")
     
+    # Initialize data collectors
     gating_samples = []
     trajectory_examples = []
     comparison_examples = []
@@ -326,6 +330,7 @@ def evaluate_truthfulqa_full(
     
     num_samples = min(len(dataset), args.max_samples) if args.max_samples else len(dataset)
     
+    # Track vanilla baseline for comparison (if DCLED)
     vanilla_scores_cache = {}
     
     for idx, sample in enumerate(tqdm(dataset[:num_samples], desc=f"TruthfulQA ({mode})")):
@@ -341,14 +346,17 @@ def evaluate_truthfulqa_full(
         
         start_time = time.time()
         first_metadata = None
+        # Evaluate true answers
         for temp_ans in ref_true:
             prompt, answer = build_prompt_and_answer(sample['question'], temp_ans)
             log_probs, extra_info = llm.lm_score(prompt, answer, **generate_kwargs)
             scores_true.append(log_probs)
             
+            # CAPTURE FIRST METADATA
             if first_metadata is None and extra_info is not None:
                 first_metadata = extra_info
         
+        # Evaluate false answers
         for temp_ans in ref_false:
             prompt, answer = build_prompt_and_answer(sample['question'], temp_ans)
             log_probs, extra_info = llm.lm_score(prompt, answer, **generate_kwargs)
@@ -357,15 +365,19 @@ def evaluate_truthfulqa_full(
         latencies.append(time.time() - start_time)
         
         scores = MC_calcs(scores_true, scores_false, ref_true, ref_false, ref_best)
-
+        # Collect confidence data for ALL methods (not just DCLED)
         if qual_collector and first_metadata and first_metadata.get('initial_confidence') is not None:
-
+            # Get current method's correctness
             method_correct = (scores['MC1'] > 0.5)
             
+            # We need vanilla baseline for comparison
+            # For now, use a heuristic: if this is not vanilla, assume vanilla is worse
             vanilla_correct = False if mode != 'VanillaGreedy' else method_correct
             
+            # Calculate improvement over vanilla
             improvement = (1.0 if method_correct else 0.0) - (1.0 if vanilla_correct else 0.0)
             
+            # Collect scatter point
             qual_collector.add_confidence_scatter_point(
                 method=mode,
                 dataset='truthfulqa',
@@ -379,13 +391,15 @@ def evaluate_truthfulqa_full(
             mc3_scores.append(scores['MC3'])
             
             if qual_collector and mode == 'DCLED' and first_metadata:
-                
+                # Determine if DCLED was correct
                 dcled_correct = (scores['MC1'] > 0.5)
                 
+                # FIXED: Get the actual predicted answer from MC_calcs
                 predicted_answer = scores.get('predicted_answer', ref_best)
                 predicted_is_true = scores.get('predicted_is_true', True)
                 predicted_score = scores.get('predicted_score', -np.inf)
                 
+                # Collect trajectory data for Figure 3 (only successful cases)
                 if first_metadata.get('trajectory') and dcled_correct:
                     qual_collector.add_evolution_trajectory(
                         question=sample['question'],
@@ -394,6 +408,7 @@ def evaluate_truthfulqa_full(
                         dataset_name='truthfulqa'
                     )
                 
+                # Collect gating decision data
                 if first_metadata.get('initial_confidence') is not None:
                     qual_collector.add_gating_decision(
                         initial_confidence=first_metadata['initial_confidence'],
@@ -402,8 +417,11 @@ def evaluate_truthfulqa_full(
                         vanilla_correct=False  
                     )
                 
-                if not dcled_correct:  
-                    
+                # ================================================================
+                # FIXED: Collect failure cases with ACTUAL predicted answer
+                # ================================================================
+                if not dcled_correct:  # DCLED failed
+                    # Create detailed failure reason
                     answer_type = 'true' if predicted_is_true else 'false'
                     failure_reason = (
                         f"DCLED selected {answer_type} answer "
@@ -414,16 +432,18 @@ def evaluate_truthfulqa_full(
                     
                     qual_collector.add_failure_case(
                         question=sample['question'],
-                        vanilla_answer="N/A",  
-                        dcled_answer=predicted_answer,  
+                        vanilla_answer="N/A",  # Would need to run vanilla to get this
+                        dcled_answer=predicted_answer,  # FIXED: Use actual prediction
                         correct_answer=ref_best,
-                        vanilla_correct=False,  
+                        vanilla_correct=False,  # Would need vanilla evaluation
                         dcled_correct=False,
                         failure_reason=failure_reason,
                         dataset_name='truthfulqa'
                     )
     
-
+    # ========================================================================
+    # COMPUTE BOOTSTRAP CONFIDENCE INTERVALS
+    # ========================================================================
     mc1_mean, mc1_ci_low, mc1_ci_high = bootstrap_confidence_interval(
         mc1_scores, args.n_bootstrap, args.confidence_level
     )
@@ -434,6 +454,9 @@ def evaluate_truthfulqa_full(
         mc3_scores, args.n_bootstrap, args.confidence_level
     )
     
+    # ========================================================================
+    # PREPARE RESULTS DICTIONARY
+    # ========================================================================
     results = {
         'total_mc1': mc1_mean,
         'mc1_ci_lower': mc1_ci_low,
@@ -456,7 +479,7 @@ def evaluate_truthfulqa_full(
             'mc3': [float(x) for x in mc3_scores]
         }
     }
-    
+
     logger.info(f"MC1: {mc1_mean:.4f} [{mc1_ci_low:.4f}, {mc1_ci_high:.4f}]")
     logger.info(f"MC2: {mc2_mean:.4f} [{mc2_ci_low:.4f}, {mc2_ci_high:.4f}]")
     logger.info(f"MC3: {mc3_mean:.4f} [{mc3_ci_low:.4f}, {mc3_ci_high:.4f}]")
@@ -478,10 +501,11 @@ def evaluate_benchmark_full(
     custom_params: Optional[Dict] = None,
     qual_collector: Optional[QualitativeExperimentCollector] = None
 ) -> Dict:
-
+    """Full benchmark evaluation with bootstrap confidence intervals."""
     
     logger.info(f"[{name.upper()}] Evaluating {mode}")
     
+    # Initialize data collectors
     gating_samples = []
     trajectory_examples = []
     
@@ -501,13 +525,13 @@ def evaluate_benchmark_full(
         try:
             start_time = time.time()
             
-
+            # INITIALIZE VARIABLES AT START OF LOOP
             metadata_correct = None
             is_correct = False
             correct_answer = ""
             predicted_answer = ""
             question = ""
-            dataset_name = name  
+            dataset_name = name  # USE THE FUNCTION PARAMETER
             item_idx = idx
             
             if name == 'hotpotqa':
@@ -518,7 +542,7 @@ def evaluate_benchmark_full(
                 if not question or not answer:
                     continue
                 
-                correct_answer = answer  
+                correct_answer = answer  # STORE CORRECT ANSWER
                 
                 prompt = f"Context: {context}\n\nQuestion: {question}\nAnswer:"
                 
@@ -526,7 +550,7 @@ def evaluate_benchmark_full(
                 s_wrong, _ = llm.lm_score(prompt, " I don't know", **generate_kwargs)
                 
                 is_correct = s_correct > s_wrong
-                predicted_answer = answer if is_correct else "I don't know" 
+                predicted_answer = answer if is_correct else "I don't know"  # STORE PREDICTION
                 correct_samples.append(1.0 if is_correct else 0.0)
                 
             elif name in ['seal_0', 'seal_hard', 'sealqa']:
@@ -537,7 +561,7 @@ def evaluate_benchmark_full(
                 if not question or not answer:
                     continue
                 
-                correct_answer = answer 
+                correct_answer = answer  # STORE CORRECT ANSWER
                 
                 if isinstance(documents, list):
                     context = "\n\n".join(str(doc) for doc in documents)
@@ -552,7 +576,7 @@ def evaluate_benchmark_full(
                 s_wrong, _ = llm.lm_score(prompt, " I don't know", **generate_kwargs)
                 
                 is_correct = s_correct > s_wrong
-                predicted_answer = answer if is_correct else "I don't know"  
+                predicted_answer = answer if is_correct else "I don't know"  # STORE PREDICTION
                 correct_samples.append(1.0 if is_correct else 0.0)
             
             latencies.append(time.time() - start_time)
@@ -568,10 +592,12 @@ def evaluate_benchmark_full(
                     )
                 
                 if metadata_correct.get('initial_confidence') is not None:
-
+                    # Calculate improvement over vanilla baseline
+                    # For now, use heuristic: non-vanilla methods typically improve
                     vanilla_correct = False if mode != 'VanillaGreedy' else is_correct
                     improvement = (1.0 if is_correct else 0.0) - (1.0 if vanilla_correct else 0.0)
                     
+                    # Add scatter point for this method
                     qual_collector.add_confidence_scatter_point(
                         method=mode,
                         dataset=dataset_name,
@@ -584,9 +610,9 @@ def evaluate_benchmark_full(
                         initial_confidence=metadata_correct['initial_confidence'],
                         gating_triggered=metadata_correct.get('gating_triggered', False),
                         dcled_correct=is_correct,
-                        vanilla_correct=False  
+                        vanilla_correct=False  # Would need vanilla run to get this
                     )
-                
+
                 if mode == 'DCLED' and not is_correct:
                     qual_collector.add_failure_case(
                         question=question[:200],
@@ -621,10 +647,10 @@ def evaluate_benchmark_full(
         "raw_scores": [float(x) for x in correct_samples]
     }
     
-
     logger.info(f"Accuracy: {acc_mean:.4f} [{acc_ci_low:.4f}, {acc_ci_high:.4f}]")
     logger.info(f"Correct: {results['correct']}/{results['total']}")
     
+    # Enhanced logging for qualitative data collection
     if qual_collector:
         logger.info(f"Qualitative data collected from {dataset_name} ({mode}):")
         if mode == 'DCLED':
@@ -634,3 +660,4 @@ def evaluate_benchmark_full(
         logger.info(f"   Confidence scatter points: {len(qual_collector.confidence_scatter_data)}")
     
     return results
+
