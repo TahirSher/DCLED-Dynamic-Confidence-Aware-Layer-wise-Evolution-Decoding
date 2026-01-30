@@ -55,25 +55,54 @@ def load_truthfulqa_dataset(data_path: str) -> List[Dict]:
     logger.info(f"[TruthfulQA] Loaded {len(dataset)} valid samples")
     return dataset
 
-def load_benchmark_dataset(name: str, max_samples: Optional[int] = None) -> List[Dict]:
-    """Load benchmark datasets."""
+def load_benchmark_dataset(name: str, max_samples: Optional[int] = None, data_dir: Optional[str] = None) -> List[Dict]:
+
     try:
         if name == 'hotpotqa':
-            ds = load_dataset("hotpotqa/hotpot_qa", "fullwiki")
+
+            if data_dir:
+                local_path = os.path.join(data_dir, "hotpotqa")
+                if os.path.exists(local_path):
+                    ds = hf_load_dataset(local_path)
+                else:
+                    ds = hf_load_dataset("hotpotqa/hotpot_qa", "fullwiki")
+            else:
+                ds = hf_load_dataset("hotpotqa/hotpot_qa", "fullwiki")
             data = [ex for ex in ds["validation"]]
-        elif name == 'sealqa':
-            ds = load_dataset("vtllms/sealqa", name="longseal", split="test")
+            
+        elif name in ['sealqa', 'seal_0', 'seal_hard']:
+
+            dataset_map = {
+                'sealqa': 'vtllms/sealqa',
+                'seal_0': 'vtllms/sealqa',
+                'seal_hard': 'vtllms/sealqa'
+            }
+            
+            if data_dir:
+                local_path = os.path.join(data_dir, name)
+                if os.path.exists(local_path):
+                    ds = hf_load_dataset(local_path)
+                else:
+                    ds = hf_load_dataset(dataset_map[name], name=name if name != 'sealqa' else "longseal", split="test")
+            else:
+                ds = hf_load_dataset(dataset_map[name], name=name if name != 'sealqa' else "longseal", split="test")
             data = [ex for ex in ds]
-        elif name == 'seal_0':
-            ds = load_dataset("vtllms/sealqa", name="seal_0", split="test")
-            data = [ex for ex in ds]
-        elif name == 'seal_hard':
-            ds = load_dataset("vtllms/sealqa", name="seal_hard", split="test")
-            data = [ex for ex in ds]
+            
+        elif name == 'truthfulqa':
+
+            if data_dir:
+                data_path = os.path.join(data_dir, "TruthfulQA.csv")
+                if not os.path.exists(data_path):
+                    data_path = data_dir 
+                data = load_truthfulqa_dataset(data_path)
+            else:
+                data = load_truthfulqa_dataset("./data/TruthfulQA.csv")
+                
         else:
+            logger.error(f"Unknown dataset: {name}")
             return []
         
-        if max_samples:
+        if max_samples and data:
             data = data[:max_samples]
         
         logger.info(f"[{name}] Loaded {len(data)} samples")
@@ -81,11 +110,22 @@ def load_benchmark_dataset(name: str, max_samples: Optional[int] = None) -> List
     
     except Exception as e:
         logger.error(f"Failed to load {name}: {e}")
-        return []
 
-# ============================================================================
-# DATASET-SPECIFIC ABLATION STUDY (UPDATED FOR STREAMLINED DCLED)
-# ============================================================================
+        if data_dir:
+            logger.info(f"Trying to load {name} from local directory: {data_dir}")
+            local_path = os.path.join(data_dir, name)
+            if os.path.exists(local_path):
+                try:
+                    ds = hf_load_dataset(local_path)
+                    data = [ex for ex in ds]
+                    logger.info(f"[{name}] Loaded {len(data)} samples from local directory")
+                    if max_samples:
+                        data = data[:max_samples]
+                    return data
+                except Exception as e2:
+                    logger.error(f"Failed to load from local directory: {e2}")
+        
+        return []
 def get_dataset_specific_ablation_configs(base_params: Dict[str, Any]) -> Dict[str, Dict]:
     """
     Generate ablation configurations for streamlined DCLED.
@@ -173,4 +213,3 @@ def check_available_datasets(data_dir: str = None) -> Dict[str, bool]:
             available[ds_name] = False
     
     return available
-
