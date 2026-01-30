@@ -45,7 +45,7 @@ class UnifiedDCSLED:
         logger.info(f"[Model] {self.num_layers} layers, size: {self.model_size_category}")
     
     def _load_model(self, model_name: str):
-
+        """Load model and tokenizer."""
         if self.device == "cuda":
             kwargs = {
                 "torch_dtype": torch.float16,
@@ -84,7 +84,7 @@ class UnifiedDCSLED:
         return model, tokenizer
     
     def set_stop_words(self, stop_words: List[str]):
-
+        """Configure stopping criteria."""
         self.stop_words = stop_words
         self.stopping_criteria = StoppingCriteriaList()
         list_stop_word_ids = []
@@ -182,8 +182,7 @@ class UnifiedDCSLED:
         log_probs = diff_log_probs[range(seq_len), continue_ids].mean().item()
         
         return log_probs, premature_layer_dist
-    
-    
+        
     def lm_score(
         self,
         input_text1: str,
@@ -282,7 +281,6 @@ class UnifiedDCSLED:
                     relative_top_value=relative_top_value,
                     dola_alpha=dola_alpha
                 )
-        
             
             elif mode in ['SLED', 'DCLED']:
                 use_dc = mode == 'DCLED'
@@ -292,7 +290,6 @@ class UnifiedDCSLED:
                 op_T = config.get('op_T', 12)
                 trajectory_data = []
                 
-
                 confidence_boost = config.get('confidence_boost', 1.8) if use_dc else 1.0
                 signal_strength = config.get('signal_strength', 0.85) if use_dc else 1.0
                 contrastive_strength = config.get('contrastive_strength', 0.25) if use_dc else 0.0
@@ -318,13 +315,13 @@ class UnifiedDCSLED:
                 premature_logits = torch.stack([dict_outputs[l][0] for l in available_layers], dim=0)
                 
                 softmax_premature = stable_softmax(premature_logits, dim=-1, temperature=temperature)
-                P_latent = softmax_premature.mean(dim=0)  
+                P_latent = softmax_premature.mean(dim=0)  # Average of early layers
                 P_latent = P_latent.clamp(min=PROB_CLAMP_MIN, max=PROB_CLAMP_MAX)
-                P_latent = P_latent / P_latent.sum(dim=-1, keepdim=True)  
+                P_latent = P_latent / P_latent.sum(dim=-1, keepdim=True)  # Renormalize
                 
                 mature_probs = stable_softmax(mature_logits, dim=-1, temperature=temperature)
                 
-                gating_enabled = (use_dc and gen_confidence_threshold > 0)  
+                gating_enabled = (use_dc and gen_confidence_threshold > 0)  # ADD THIS LINE
                 
                 if gating_enabled:
                     max_probs, _ = mature_probs.max(dim=-1)
@@ -337,18 +334,17 @@ class UnifiedDCSLED:
                 contrastive_direction = torch.zeros_like(mature_logits)
                 
                 if use_dc and contrastive_strength > 0 and num_gated > 0:
-                   
+ 
                     prob_diff = mature_probs - P_latent
                     prob_diff = prob_diff.clamp(min=-1.0, max=1.0)
                     
-                    
                     contrastive_direction = prob_diff * 2.0
                     contrastive_direction = contrastive_direction.clamp(min=-5.0, max=5.0)
-                
+
                 confidence_multiplier = torch.ones(seq_len, 1, device=mature_logits.device)
                 
                 if use_dc and confidence_boost > 1.0 and num_gated > 0:
-
+                    # Get top-k probabilities
                     top_k = min(5, mature_probs.shape[-1])
                     topk_probs, _ = mature_probs.topk(top_k, dim=-1)
                     
@@ -362,20 +358,20 @@ class UnifiedDCSLED:
                     confidence_multiplier = 1.0 + (boost_factor - 1.0) * confidence_score
                     confidence_multiplier = confidence_multiplier.clamp(min=0.5, max=3.0)
                     confidence_multiplier = confidence_multiplier.unsqueeze(-1)
-                
+
                 hidden = mature_logits.clone()
                 
                 n_iterations = min(evolution_scale if 'evolution_scale' in config else op_T, 200)
                 n_iterations = max(1, n_iterations)
                 
                 for t in range(n_iterations):
-
+                    # Adaptive learning rate
                     lr_t = evolution_rate * (1.0 - t / n_iterations)
                     lr_t = max(0.01, min(5.0, lr_t))
                     
                     P_current = stable_softmax(hidden, dim=-1, temperature=temperature)
 
-                    if use_dc and t % 2 == 0:  
+                    if use_dc and t % 2 == 0:  # Collect every 2nd iteration to reduce data
                         top2_probs, top2_indices = P_current[0].topk(2)
                         correct_token_prob = P_current[0, continue_ids[0]].item() if len(continue_ids) > 0 else 0.0
                         
@@ -390,16 +386,13 @@ class UnifiedDCSLED:
                             'correct_token_prob': correct_token_prob,
                             'is_correct': is_top1_correct
                         })
-
                     base_gradient = P_current - P_latent
                     base_gradient = base_gradient.clamp(min=-10.0, max=10.0)
                     
-
                     final_gradient = base_gradient
                     
-
                     if use_dc and num_gated > 0:
-
+                    
                         if contrastive_strength > 0:
                             contrastive_contribution = contrastive_strength * contrastive_direction
                             contrastive_contribution = contrastive_contribution.clamp(min=-2.0, max=2.0)
@@ -416,7 +409,7 @@ class UnifiedDCSLED:
                     hidden = hidden - lr_t * final_gradient
                     hidden = hidden.clamp(min=-LOGIT_CLIP_MAX, max=LOGIT_CLIP_MAX)
                     hidden = torch.nan_to_num(hidden, nan=0.0, posinf=LOGIT_CLIP_MAX, neginf=-LOGIT_CLIP_MAX)
-                
+
                 final_logits = torch.where(
                     gate_mask.unsqueeze(-1),
                     hidden,
@@ -424,7 +417,7 @@ class UnifiedDCSLED:
                 )
                 
                 final_logits = torch.nan_to_num(final_logits, nan=0.0, posinf=LOGIT_CLIP_MAX, neginf=-LOGIT_CLIP_MAX)
-                
+
                 if relative_top > 0.0:
                     top_mask = get_relative_top_filter(final_logits, relative_top)
                     final_logits = torch.where(
@@ -433,19 +426,16 @@ class UnifiedDCSLED:
                         final_logits
                     )
                 
-
                 log_output = stable_log_softmax(final_logits, dim=-1) if post_softmax else final_logits
                 log_output = torch.nan_to_num(log_output, nan=-100.0, posinf=0.0, neginf=-100.0)
                 
                 log_probs = log_output[range(seq_len), continue_ids].sum().item()
                 
-
                 if math.isnan(log_probs) or math.isinf(log_probs):
                     logger.warning(f"NaN/Inf detected in {mode}, returning fallback score")
                     vanilla_log_probs = stable_log_softmax(mature_logits, dim=-1)
                     log_probs = vanilla_log_probs[range(len(continue_ids)), continue_ids].sum().item()
                 
-
                 metadata = None
                 if use_dc:
                     final_probs = stable_softmax(final_logits, dim=-1, temperature=temperature)
@@ -457,12 +447,12 @@ class UnifiedDCSLED:
                     initial_top1_token = initial_probs.argmax(dim=-1)[0].item() if seq_len > 0 else -1
                     
                     metadata = {
-                        'trajectory': trajectory_data if len(trajectory_data) > 0 else None,  
+                        'trajectory': trajectory_data if len(trajectory_data) > 0 else None,  # ADD CONDITION
                         'initial_confidence': initial_max_prob,
                         'final_confidence': final_max_prob,
                         'initial_top1_token': initial_top1_token,
                         'final_top1_token': final_top1_token,
-                        'gating_triggered': num_gated > 0, 
+                        'gating_triggered': num_gated > 0,  # FIXED
                         'num_tokens_gated': num_gated,
                         'total_tokens': seq_len,
                         'n_iterations': n_iterations,
@@ -472,4 +462,8 @@ class UnifiedDCSLED:
                 return log_probs, metadata
             
             else:
+                raise ValueError(f"Unknown mode: {mode}")
+            
+            else:
+
                 raise ValueError(f"Unknown mode: {mode}")
